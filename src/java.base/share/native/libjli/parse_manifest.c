@@ -153,32 +153,36 @@ readAt(int fd, jlong pos, unsigned int count, void *buf) {
  * See APPNOTE.TXT 4.5.3.
  */
 static jboolean
-read_zip64_ext(Byte *p, jlong *cenlen, jlong *censiz, jlong *cenoff,
-               unsigned short cendsk) {
-  short headerId = ZIPEXT_HDR(p);
-  if (headerId != ZIP64_EXTID) {
-    return JNI_FALSE;
-  }
-  short headerSize = ZIPEXT_SIZ(p);
-  short expectedSize =
-      (*cenlen == ZIP64_MAGICVAL ? 8 : 0) +
-      (*censiz == ZIP64_MAGICVAL ? 8 : 0) +
-      (*cenoff == ZIP64_MAGICVAL ? 8 : 0) +
-      (cendsk == ZIP64_MAGICCOUNT ? 4 : 0);
-  if (headerSize != expectedSize) {
-    return JNI_FALSE;
-  }
-  jlong offset = 4;
-  if (*cenlen == ZIP64_MAGICVAL) {
-    *cenlen = LL(p, offset);
-    offset += 8;
-  }
-  if (*censiz == ZIP64_MAGICVAL) {
-    *censiz = LL(p, offset);
-    offset += 8;
-  }
-  if (*cenoff == ZIP64_MAGICVAL) {
-    *cenoff = LL(p, offset);
+read_zip64_ext(Byte *p, jlong cenext, jlong *cenlen, jlong *censiz,
+               jlong *cenoff, unsigned short cendsk) {
+  jlong offset = 0;
+  while (offset < cenext) {
+    short headerId = ZIPEXT_HDR(p + offset);
+    short headerSize = ZIPEXT_SIZ(p + offset);
+    if (headerId == ZIP64_EXTID) {
+      short expectedSize =
+          (*cenlen == ZIP64_MAGICVAL ? 8 : 0) +
+          (*censiz == ZIP64_MAGICVAL ? 8 : 0) +
+          (*cenoff == ZIP64_MAGICVAL ? 8 : 0) +
+          (cendsk == ZIP64_MAGICCOUNT ? 4 : 0);
+      if (headerSize != expectedSize) {
+        return JNI_FALSE;
+      }
+      jlong offset = 4;
+      if (*cenlen == ZIP64_MAGICVAL) {
+        *cenlen = LL(p, offset);
+        offset += 8;
+      }
+      if (*censiz == ZIP64_MAGICVAL) {
+        *censiz = LL(p, offset);
+        offset += 8;
+      }
+      if (*cenoff == ZIP64_MAGICVAL) {
+        *cenoff = LL(p, offset);
+      }
+      return JNI_TRUE;
+    }
+    offset += 4 + headerSize;
   }
   return JNI_TRUE;
 }
@@ -195,23 +199,20 @@ validate_lochdr(int fd, jlong censtart, jlong base_offset, Byte *cenhdr) {
   jlong cenoff = CENOFF(cenhdr);
   jlong cenext = CENEXT(cenhdr);
   if (cenoff == ZIP64_MAGICVAL && cenext > 0) {
-    Byte p[ZIP64_EXTMAXLEN];
-    jlong start = censtart + CENHDR + CENNAM(cenhdr);
-    jlong offset = 0;
-    while (offset < cenext) {
-      if (!readAt(fd, start + offset, ZIP64_EXTMAXLEN, p)) {
-        return JNI_FALSE;
-      }
-      short headerId = ZIPEXT_HDR(p);
-      short headerSize = ZIPEXT_SIZ(p);
-      if (headerId == ZIP64_EXTID) {
-        if (!read_zip64_ext(p, &cenlen, &censiz, &cenoff, CENDSK(cenhdr))) {
-          return JNI_FALSE;
-        }
-        break;
-      }
-      offset += 4 + headerSize;
+    Byte *p = (Byte*)malloc(cenext);
+    if (p == NULL) {
+      return JNI_FALSE;
     }
+    jlong start = censtart + CENHDR + CENNAM(cenhdr);
+    if (!readAt(fd, start, cenext, p)) {
+      free(p);
+      return JNI_FALSE;
+    }
+    if (!read_zip64_ext(p, cenext, &cenlen, &censiz, &cenoff, CENDSK(cenhdr))) {
+      free(p);
+      return JNI_FALSE;
+    }
+    free(p);
   }
   return readAt(fd, base_offset + cenoff, LOCHDR, lochdr)
       && LOCSIG_AT(lochdr)
@@ -501,17 +502,10 @@ find_file(int fd, zentry *entry, const char *file_name)
                   || cenoff == ZIP64_MAGICVAL)
                 && cenext > 0) {
               Byte *base = p + CENHDR + CENNAM(p);
-              jlong offset = 0;
-              while (offset < cenext) {
-                short headerId = ZIPEXT_HDR(base + offset);
-                short headerSize = ZIPEXT_SIZ(base + offset);
-                if (headerId == ZIP64_EXTID) {
-                  if (!read_zip64_ext(base + offset, &cenlen, &censiz, &cenoff, CENDSK(p))) {
-                    free(buffer);
-                    return (-1);
-                  }
-                }
-                offset += 4 + headerSize;
+              if (!read_zip64_ext(base, cenext,
+                                  &cenlen, &censiz, &cenoff, CENDSK(p))) {
+                free(buffer);
+                return (-1);
               }
             }
             if (JLI_Lseek(fd, base_offset + cenoff, SEEK_SET) < (jlong)0) {
