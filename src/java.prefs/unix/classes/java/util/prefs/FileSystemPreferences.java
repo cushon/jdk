@@ -958,6 +958,8 @@ class FileSystemPreferences extends AbstractPreferences {
                 Thread.sleep(sleepTime);
             } catch(InterruptedException e) {
                 checkLockFile0ErrorCode(errorCode);
+                // Don't lose the interrupt unless we throw.
+                Thread.currentThread().interrupt();
                 return false;
             }
             sleepTime *= 2;
